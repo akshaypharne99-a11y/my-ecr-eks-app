@@ -1,0 +1,74 @@
+name: Build and Deploy to EKS
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: my-app
+  EKS_CLUSTER: my-cluster
+  K8S_NAMESPACE: production
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download repository code
+        uses: actions/checkout@v4
+
+      - name: Run basic tests
+        run: |
+          test -f index.html
+          test -f Dockerfile
+          test -f k8s/deployment.yaml
+          test -f k8s/service.yaml
+          echo "Tests passed"
+
+      - name: Connect GitHub Actions to AWS
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+      - name: Connect to EKS cluster
+        run: |
+          aws eks update-kubeconfig \
+            --region $AWS_REGION \
+            --name $EKS_CLUSTER
+
+      - name: Deploy application to Kubernetes
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          kubectl create namespace $K8S_NAMESPACE \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+
+          kubectl set image deployment/my-app \
+            app=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            --namespace=$K8S_NAMESPACE
+
+          kubectl rollout status deployment/my-app \
+            --namespace=$K8S_NAMESPACE
